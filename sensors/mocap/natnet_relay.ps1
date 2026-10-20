@@ -44,8 +44,8 @@
 
 .EXAMPLE
     # Multicast fallback. In Motive: Transmission Type=Multicast,
-    # Local Interface=192.168.55.191.
-    powershell -ExecutionPolicy Bypass -File .\natnet_relay.ps1 -Mode multicast -McastIface 192.168.55.191
+    # Local Interface=198.51.100.191.
+    powershell -ExecutionPolicy Bypass -File .\natnet_relay.ps1 -Mode multicast -McastIface 198.51.100.191
 #>
 param(
     [ValidateSet("unicast", "multicast")]
@@ -55,7 +55,7 @@ param(
     [int]$DataPort      = 1511,
     [int]$TcpPort       = 1512,
     [string]$McastGroup = "239.255.42.99",
-    [string]$McastIface = "192.168.55.191"
+    [string]$McastIface = "127.0.0.1"
 )
 
 # NatNet command message IDs.

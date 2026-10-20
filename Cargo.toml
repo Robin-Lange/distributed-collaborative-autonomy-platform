@@ -19,7 +19,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 license = "LicenseRef-Proprietary"
-repository = "https://git.ihmc.us/ncca/distributed-collaborative-autonomy-platform"
+repository = "https://github.com/Robin-Lange/distributed-collaborative-autonomy-platform"
 
 [workspace.dependencies]
 avian3d = { version = "0.7.0", default-features = false, features = ["3d", "parallel", "parry-f32"] }

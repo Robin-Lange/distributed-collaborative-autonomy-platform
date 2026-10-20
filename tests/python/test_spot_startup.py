@@ -108,7 +108,7 @@ class SpotStartupTests(unittest.TestCase):
         robot = FakeRobot(events, powered_on=True)
         lease = RecordingLease(events)
 
-        constructor = self.run_main(robot, lease, ["192.168.55.21"])
+        constructor = self.run_main(robot, lease, ["198.51.100.21"])
 
         constructor.assert_called_once_with(
             robot.lease_client,
@@ -146,7 +146,7 @@ class SpotStartupTests(unittest.TestCase):
             self.run_main(
                 robot,
                 lease,
-                ["192.168.55.21", "--auto-power-on"],
+                ["198.51.100.21", "--auto-power-on"],
             )
 
         self.assertEqual(
