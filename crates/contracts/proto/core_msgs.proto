@@ -1,0 +1,450 @@
+syntax = "proto3";
+
+package core_msgs;
+
+// Plain 3-component vector; the wire representation of every `[f32; 3]`
+// field in `core_msgs::messages` (positions, points, targets).
+message Vec3 {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+// What the operator wants the agent to do with a waypoint.
+enum Behavior {
+  BEHAVIOR_GO_TO = 0;
+  BEHAVIOR_MOVE_AWAY = 1;
+  BEHAVIOR_HOLD = 2;
+}
+
+// Who produced a message (e.g. the sim or the Spot adapter).
+enum Source {
+  SOURCE_ENVIRONMENT_RUNTIME = 0;
+  SOURCE_SPOT_ADAPTER = 1;
+}
+
+// Who is allowed to command the agent.
+enum CommandSource {
+  COMMAND_SOURCE_AUTONOMY = 0;
+  COMMAND_SOURCE_HUMAN_OPERATOR = 1;
+  COMMAND_SOURCE_NONE = 255;
+}
+
+// Whose position estimate the agent trusts.
+enum StateAuthority {
+  STATE_AUTHORITY_UNSPECIFIED = 0;
+  STATE_AUTHORITY_ENVIRONMENT_RUNTIME = 1;
+  STATE_AUTHORITY_REAL = 2;
+  STATE_AUTHORITY_NONE = 255;
+}
+
+// What actually moves the body: simulated physics or the real world.
+enum PhysicsAuthority {
+  PHYSICS_AUTHORITY_UNSPECIFIED = 0;
+  PHYSICS_AUTHORITY_AVIAN = 1;
+  PHYSICS_AUTHORITY_REAL_WORLD = 2;
+  PHYSICS_AUTHORITY_NONE = 255;
+}
+
+// Whose interaction reports the safety gate may act on.
+enum InteractionAuthority {
+  INTERACTION_AUTHORITY_UNSPECIFIED = 0;
+  INTERACTION_AUTHORITY_ENVIRONMENT_RUNTIME = 1;
+  INTERACTION_AUTHORITY_REAL_SENSORS = 2;
+  INTERACTION_AUTHORITY_NONE = 255;
+}
+
+// Whose collision/constraint reports the safety gate may act on.
+enum CollisionAuthority {
+  COLLISION_AUTHORITY_UNSPECIFIED = 0;
+  COLLISION_AUTHORITY_AVIAN_CONTACTS = 1;
+  COLLISION_AUTHORITY_REAL_SENSORS = 2;
+  COLLISION_AUTHORITY_FUSED = 3;
+  COLLISION_AUTHORITY_NONE = 255;
+}
+
+// The agent's overall operating mode (truth model).
+enum RuntimeMode {
+  RUNTIME_MODE_SIM = 0;
+  RUNTIME_MODE_REAL = 1;
+  RUNTIME_MODE_HYBRID = 2;
+  RUNTIME_MODE_EMERGENCY_STOP = 4;
+}
+
+// What kind of platform command is being sent.
+enum CommandType {
+  COMMAND_TYPE_TRAJECTORY = 0;
+  COMMAND_TYPE_HOLD = 1;
+  COMMAND_TYPE_STOP = 2;
+  COMMAND_TYPE_VELOCITY = 3;
+}
+
+// How a command finished, as judged by the platform.
+enum CommandStatusCode {
+  COMMAND_STATUS_CODE_SUCCEEDED = 0;
+  COMMAND_STATUS_CODE_ABORTED = 1;
+}
+
+// Why the agent refused (vetoed) a command.
+enum VetoReason {
+  VETO_REASON_NONE = 0;
+  VETO_REASON_STALE_STATE = 1;
+  VETO_REASON_COLLISION_STOP = 2;
+  VETO_REASON_UNAUTHORIZED_SOURCE = 3;
+  VETO_REASON_NO_STATE = 4;
+  VETO_REASON_BAD_FRAME = 5;
+  VETO_REASON_ROBOT_FAULT = 6;
+  // Manipulation-specific precondition rejections.
+  // Reuses the navigation veto vocabulary/message instead of a parallel
+  // rejection type: a manipulation intent is refused the same way a
+  // waypoint intent is.
+  VETO_REASON_UNKNOWN_OBJECT = 7;
+  VETO_REASON_OBJECT_NOT_FREE = 8;
+  VETO_REASON_OBJECT_NOT_HELD = 9;
+  VETO_REASON_TRAJECTORY_ACTIVE = 10;
+  VETO_REASON_TASK_ACTIVE = 11;
+  VETO_REASON_UNREACHABLE = 12;
+  // The platform bridge process was confirmed dead via Zenoh liveliness
+  // (session/process death), independent of state staleness.
+  VETO_REASON_PLATFORM_DEAD = 13;
+  // A newer waypoint intent replaced a still-latched, unfinished
+  // autonomy-sourced intent in the agent inbox before it completed. Emitted so
+  // an autonomous planner awaiting terminal feedback for the old command_id is
+  // told it was preempted instead of hanging forever.
+  VETO_REASON_SUPERSEDED = 14;
+}
+
+// What kind of obstacle raised a constraint.
+enum ConstraintType {
+  CONSTRAINT_TYPE_WALL = 0;
+  CONSTRAINT_TYPE_ROBOT_FAULT = 1;
+  CONSTRAINT_TYPE_VIRTUAL_WALL = 2;
+  // The platform gave up on a goal (blocked/unreachable). One-shot: cleared by
+  // a newer operator intent, never by a severity-NONE event.
+  CONSTRAINT_TYPE_GOAL_BLOCKED = 3;
+}
+
+// How serious a constraint is; HARD_STOP forces the agent to hold.
+enum Severity {
+  SEVERITY_NONE = 0;
+  SEVERITY_HARD_STOP = 1;
+}
+
+message AuthorityState {
+  string agent_id = 1;
+  CommandSource command_authority = 2;
+  StateAuthority state_authority = 3;
+  PhysicsAuthority physics_authority = 4;
+  CollisionAuthority collision_authority = 5;
+  RuntimeMode mode = 6;
+  string reason = 7;
+  uint64 stamp_ms = 8;
+}
+
+
+// Each producer owns its own constraint keys and must clear only those
+// keys, so independent safety conditions cannot accidentally erase each other.
+// Constraint lifecycle contract (source-owned, keyed state):
+//
+// Consumers track active constraints keyed by (source, constraint_type,
+// object_id). A SEVERITY_NONE event clears only the matching key; it is never
+// a global clear. Per-source rules:
+//
+// - ENVIRONMENT_RUNTIME wall/virtual-wall constraints are level-published:
+//  re-asserted every physics tick while the condition holds, cleared with one
+//  SEVERITY_NONE. Consumers may expire them if not re-asserted (transport
+//  backstop).
+// - SPOT_ADAPTER ROBOT_FAULT constraints are level-published per condition
+//  (`object_id` = `"estop"` | `"behavior_fault:<id>"` | `"system_fault:<name>"`)
+//  and are released ONLY by the matching SEVERITY_NONE from the sidecar.
+//  They never expire and are never cleared by new intents. If the sidecar
+//  dies entirely, agent_state goes stale in the same loop and the agent's
+//  stale-state hold covers motion (state and faults share one publisher).
+// - GOAL_BLOCKED is one-shot and cleared by a newer operator intent.
+message ConstraintEvent {
+  string agent_id = 1;
+  Source source = 2;
+  CollisionAuthority collision_authority = 3;
+  ConstraintType constraint_type = 4;
+  Severity severity = 5;
+  string object_id = 6;
+  uint64 stamp_ms = 7;
+  // Correlates a hard-stop episode across constraint -> hold -> stop -> clear
+  // for offline latency reconstruction (see logs/latency_report.py). Minted
+  // by the raising producer as "<agent_id>-<onset_stamp_ms>" and reused by
+  // every re-assertion of the same condition; empty when not part of a
+  // tracked episode.
+  string episode_id = 8;
+  // Trigger kind for containment events: "overlap", "swept", "stale_state",
+  // or empty for non-containment constraints (faults, goal-blocked).
+  string detail = 10;
+}
+
+message WaypointIntent {
+  string agent_id = 1;
+  CommandSource source = 2;
+  Behavior behavior = 3;
+  Vec3 point = 4;
+  uint64 stamp_ms = 5;
+  // Frame `point` is expressed in. Must be "map"; the agent fails closed
+  // (holds + vetoes) on a missing, unknown, or non-"map" value.
+  string frame_id = 6;
+}
+
+// SE2 velocity setpoint carried by COMMAND_TYPE_VELOCITY commands.
+// Expressed in Spot's gravity-aligned "flat_body" frame: +x forward,
+// +y left, yaw CCW about +z. The sidecar forwards it verbatim as an
+// SE2VelocityCommand with se2_frame_name="flat_body" — never "body",
+// which the SDK rejects for velocity requests.
+message SE2VelocitySetpoint {
+  float forward_m_s = 1;
+  float left_m_s = 2;
+  float yaw_rate_rad_s = 3;
+}
+
+// Executor ingress contract: every platform executor (spot_sidecar,
+// environment_sim) must drop a PlatformCommand whose `agent_id` is not
+// exactly its own configured agent id, and whose `approved_by` is not
+// "onboard_agent" (core_msgs::APPROVED_BY_ONBOARD_AGENT). The approved_by
+// check is a misconfiguration guard against raw-topic publishers and foreign
+// replays — it is NOT a security boundary; trusted transport identity is a
+// separate concern.
+message PlatformCommand {
+  string agent_id = 1;
+  string command_id = 2;
+  CommandType command_type = 3;
+  CommandSource source = 4;
+  string approved_by = 5;
+  Vec3 target_position = 6;
+  uint64 stamp_ms = 7;
+  // Frame `target_position` is expressed in. Always "map"; agent only
+  // ever emits map-framed commands.
+  string frame_id = 8;
+  // For a HOLD command, the episode_id of the triggering constraint (empty
+  // when the hold has no single triggering constraint, e.g. stale-state or
+  // bad-frame holds). Copied verbatim onto every hold of that episode so
+  // offline analysis can correlate constraint -> hold -> stop without
+  // guessing from timestamps alone. Always empty on trajectory commands.
+  string episode_id = 9;
+  CommandSource command_authority = 10;
+  // Present only on COMMAND_TYPE_VELOCITY commands; absent otherwise.
+  SE2VelocitySetpoint velocity = 11;
+}
+
+message CommandStatus {
+  string agent_id = 1;
+  string command_id = 2;
+  CommandStatusCode status = 3;
+  uint64 stamp_ms = 4;
+}
+
+message AgentStateMsg {
+  string agent_id = 1;
+  Source source = 2;
+  StateAuthority state_authority = 3;
+  Vec3 position = 4;
+  uint64 stamp_ms = 5;
+  // Frame `position` is expressed in. Must be "map"; the agent fails closed
+  // (holds + vetoes) on a missing, unknown, or non-"map" value.
+  string frame_id = 6;
+  // Heading: CCW about map +Z, 0 = +X (east). In real mode this feeds the
+  // onboard PD controller's map -> flat_body error rotation, in addition to
+  // navigation/collider rendering.
+  float heading_yaw_rad = 7;
+  // Linear velocity in the map frame, m/s (z = vertical, unused by the
+  // planar controller). From Spot odometry in real mode.
+  Vec3 velocity = 8;
+  // Yaw rate, rad/s, CCW about map +Z. From Spot odometry in real mode.
+  float yaw_rate_rad_s = 9;
+}
+
+message CommandVeto {
+  string agent_id = 1;
+  string command_id = 2;
+  CommandSource source = 3;
+  VetoReason reason = 4;
+  string detail = 5;
+  uint64 stamp_ms = 6;
+}
+
+// Orientation quaternion; the wire representation of a motion-capture
+// rigid body's rotation.
+message Quat {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+  float w = 4;
+}
+
+// A single tracked rigid body's pose within one motion-capture frame.
+// `id` is the numeric NatNet rigid-body id (NatNet's per-frame data
+// carries no name, only an id assigned in Motive).
+message RigidBodyPose {
+  int32 id = 1;
+  Vec3 position = 2;
+  Quat orientation = 3;
+}
+
+// One motion-capture frame, forwarded verbatim by mocap_zenoh_bridge from
+// Motive's NatNet stream; independent of every other topic in this file.
+message MocapRigidBodyFrame {
+  repeated RigidBodyPose bodies = 1;
+  uint64 stamp_ms = 2;
+  // Frame every body's position/orientation is expressed in: "mocap_lab".
+  string frame_id = 3;
+}
+
+// Boot-time SE(3) registration published by the sidecar auto-calibration: the rigid
+// transform between the canonical `map` frame and a platform's native body
+// frame, computed once from the first stationary MOCAP fix and re-published
+// periodically for late joiners.
+message FrameCalibration {
+  string agent_id = 1;
+  string parent_frame = 2;            // "map"
+  string child_frame = 3;             // e.g. "spot_body"
+  repeated double t_parent_child = 4; // 16 doubles, row-major 4x4 SE(3)
+  repeated double t_child_parent = 5; // 16 doubles, row-major inverse
+  uint64 stamp_ms = 6;
+}
+
+// Every manipulation enum below deliberately uses `_UNSPECIFIED = 0`, unlike
+// most enums in this file. These are lifecycle values, so an unset proto3
+// field must remain distinguishable from a meaningful state.
+
+// What a manipulation command asks the platform to do with an object.
+enum ManipulationVerb {
+  MANIPULATION_VERB_UNSPECIFIED = 0;
+  MANIPULATION_VERB_PICK_UP = 1;
+  MANIPULATION_VERB_DROP_OFF = 2;
+}
+
+// Lifecycle phase of one manipulation command's execution.
+enum ManipulationPhase {
+  MANIPULATION_PHASE_UNSPECIFIED = 0;
+  MANIPULATION_PHASE_APPROVED = 1;
+  MANIPULATION_PHASE_IN_PROGRESS = 2;
+  MANIPULATION_PHASE_SUCCEEDED = 3;
+  MANIPULATION_PHASE_FAILED = 4;
+}
+
+// Why a manipulation command reported MANIPULATION_PHASE_FAILED. Rejections
+// before a command exists (unreachable, object not free, ...) use the
+// shared `VetoReason`/`CommandVeto` vocabulary instead — this enum only
+// covers failures that can occur *during* an approved command's execution.
+enum ManipulationFailureReason {
+  MANIPULATION_FAILURE_REASON_UNSPECIFIED = 0;
+  // A hard stop or fresh platform command preempted the in-flight sequence.
+  MANIPULATION_FAILURE_REASON_SAFETY_STOP = 1;
+  // A real-object close reached the fully closed goal without contact feedback.
+  MANIPULATION_FAILURE_REASON_NO_OBJECT_DETECTED = 2;
+  // The exact requested grip center was below the platform's floor clearance.
+  MANIPULATION_FAILURE_REASON_UNSAFE_GRIP_HEIGHT = 3;
+}
+
+// Whether an object is available to pick up or currently held.
+enum ObjectLifecycle {
+  OBJECT_LIFECYCLE_UNSPECIFIED = 0;
+  OBJECT_LIFECYCLE_FREE = 1;
+  OBJECT_LIFECYCLE_HELD = 2;
+}
+
+// Named hand-orientation profile a `ManipulationCommand` should use. The
+// executor (sidecar/environment_sim) derives full hand orientation from
+// this plus `target_pose.yaw_rad` rather than carrying a raw quaternion —
+// `PoseXYZYaw` stays yaw-only by design (see its own comment below).
+enum ManipulationGraspProfile {
+  MANIPULATION_GRASP_PROFILE_UNSPECIFIED = 0;
+  // Gripper approach axis points straight down, yawed to target_pose.yaw_rad.
+  MANIPULATION_GRASP_PROFILE_TOP_DOWN = 1;
+  // Reserved: grip along a MOCAP-tracked object's local X axis, perpendicular
+  // to its local Z axis. ManipulationCommand currently carries only a
+  // yaw-resolved target pose, so executors cannot resolve this full-orientation
+  // profile from the command alone.
+  MANIPULATION_GRASP_PROFILE_MOCAP_X_AXIS = 2;
+}
+
+// A yaw-only planar pose. The stack is deliberately yaw-only (objects sit on
+// the floor); a 6-DoF quaternion pose is a wire-compatible future addition
+// if it is ever needed.
+message PoseXYZYaw {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+  float yaw_rad = 4;
+}
+
+// Operator/autonomy request to manipulate a known catalog object. Mirrors
+// `WaypointIntent`: not yet authority/safety checked.
+message ManipulationIntent {
+  string agent_id = 1;
+  string object_id = 2;
+  ManipulationVerb verb = 3;
+  CommandSource source = 4;
+  uint64 stamp_ms = 5;
+  // Frame the (future, currently unused) target pose override would be
+  // expressed in. Must be "map"; present for wire symmetry with
+  // WaypointIntent/PlatformCommand even though this phase always resolves
+  // the pose from the object catalog.
+  string frame_id = 6;
+}
+
+// Approved manipulation command, analogous to `PlatformCommand`: passed
+// authority/safety/reachability checks and carries the resolved target pose.
+message ManipulationCommand {
+  string agent_id = 1;
+  string command_id = 2;
+  string object_id = 3;
+  ManipulationVerb verb = 4;
+  string approved_by = 5;
+  PoseXYZYaw target_pose = 6;
+  uint64 stamp_ms = 7;
+  string frame_id = 8;
+  ManipulationGraspProfile grasp_profile = 9;
+}
+
+// Execution status update for a previously issued `ManipulationCommand`.
+message ManipulationStatus {
+  string agent_id = 1;
+  string command_id = 2;
+  string object_id = 3;
+  ManipulationPhase phase = 4;
+  ManipulationFailureReason failure_reason = 5;
+  uint64 stamp_ms = 6;
+}
+
+// Current lifecycle/pose of one catalog object, published by whichever
+// component owns object truth for the active mode (environment_sim in sim
+// mode; a MOCAP-backed object_tracker in real mode).
+message ObjectState {
+  string object_id = 1;
+  ObjectLifecycle lifecycle = 2;
+  string holder_agent_id = 3;
+  PoseXYZYaw pose = 4;
+  bool pose_valid = 5;
+  uint64 stamp_ms = 6;
+  // Full orientation in `map`, present for a real, MOCAP-tracked object once
+  // `object_tracker` has an observation. Virtual catalog objects remain
+  // yaw-only through `pose.yaw_rad`. Message presence distinguishes an
+  // observed orientation from an absent one.
+  Quat orientation_map = 7;
+}
+
+message ContactState {
+  string agent_id = 1;
+  Source source = 2;
+  CollisionAuthority collision_authority = 3;
+  string other_entity_id = 4;
+  Vec3 contact_normal = 5;
+  uint64 stamp_ms = 6;
+}
+
+
+message InteractionEvent {
+  string agent_id = 1;
+  Source source = 2;
+  InteractionAuthority interaction_authority = 3;
+  string object_id = 4;
+  string event_type = 5;
+  string reason = 6;
+  uint64 stamp_ms = 7;
+}

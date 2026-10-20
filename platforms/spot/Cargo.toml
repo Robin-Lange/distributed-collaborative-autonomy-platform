@@ -1,0 +1,11 @@
+[package]
+name = "dca-platform-spot"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Code-defined capabilities for the Boston Dynamics Spot platform"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core_msgs = { package = "dca-contracts", path = "../../crates/contracts" }

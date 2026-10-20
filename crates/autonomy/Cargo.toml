@@ -1,0 +1,12 @@
+[package]
+name = "dca-autonomy"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Platform-agnostic behavior and guidance logic"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core_msgs = { package = "dca-contracts", path = "../contracts" }
+glam.workspace = true

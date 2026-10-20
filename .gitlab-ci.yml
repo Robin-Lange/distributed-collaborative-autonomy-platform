@@ -1,0 +1,906 @@
+stages:
+  - test
+  - runtime
+  - release
+
+variables:
+  AFTER_SCRIPT_IGNORE_ERRORS: "false"
+  RUNNER_SCRIPT_TIMEOUT: "50m"
+  RUNNER_AFTER_SCRIPT_TIMEOUT: "5m"
+  FF_USE_WINDOWS_LEGACY_PROCESS_STRATEGY: "false"
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  CARGO_TERM_COLOR: never
+  RUSTUP_TOOLCHAIN: "1.96.0"
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "core.longpaths"
+  GIT_CONFIG_VALUE_0: "true"
+
+.cargo_cache: &cargo_cache
+  key: "cargo-$RUSTUP_TOOLCHAIN-$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cargo/registry/cache/
+    - .cargo/registry/index/
+
+.ubuntu_rust:
+  tags: [linux]
+  variables:
+    RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+  before_script:
+    - mkdir -p logs
+    - rm -f logs/ci-preflight.log logs/validation-bootstrap.log
+      logs/validation-*.log logs/release-build.log
+      logs/release-package.log
+    - echo "Ubuntu Rust runner preflight started." > logs/ci-preflight.log
+    - apt-get update >> logs/ci-preflight.log 2>&1
+    - |
+      apt-get install --no-install-recommends -y \
+        ca-certificates \
+        curl \
+        g++ \
+        lld \
+        pkg-config \
+        libasound2-dev \
+        libudev-dev \
+        libwayland-dev \
+        libx11-dev \
+        libxkbcommon-dev \
+        libxkbcommon-x11-0 \
+        >> logs/ci-preflight.log 2>&1
+    - |
+      set -o pipefail
+      if ! curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        2>> logs/ci-preflight.log |
+        sh -s -- -y --profile minimal \
+          --default-toolchain "$RUSTUP_TOOLCHAIN" \
+          --component rustfmt,clippy \
+          >> logs/ci-preflight.log 2>&1; then
+        echo "Rust toolchain installation failed." >> logs/ci-preflight.log
+        exit 1
+      fi
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - |
+      source /etc/os-release
+      cat /etc/os-release >> logs/ci-preflight.log
+      actual_architecture="$(uname -m)"
+      echo "Architecture $actual_architecture" >> logs/ci-preflight.log
+      if [ "$ID" != ubuntu ] || [ "$VERSION_ID" != "24.04" ]; then
+        echo "Expected Ubuntu 24.04, found $ID $VERSION_ID." \
+          >> logs/ci-preflight.log
+        exit 1
+      fi
+      case "$DCA_CI_EXPECTED_ARCH:$actual_architecture" in
+        x86_64:x86_64|arm64:aarch64|arm64:arm64) ;;
+        *)
+          echo "Expected $DCA_CI_EXPECTED_ARCH, found $actual_architecture." \
+            >> logs/ci-preflight.log
+          exit 1
+          ;;
+      esac
+  cache: *cargo_cache
+
+.ubuntu_x86_64:
+  extends: .ubuntu_rust
+  image:
+    name: ubuntu:24.04
+    docker:
+      platform: amd64
+  variables:
+    DCA_CI_EXPECTED_ARCH: "x86_64"
+
+.ubuntu_arm64:
+  extends: .ubuntu_rust
+  image:
+    name: ubuntu:24.04
+    docker:
+      platform: arm64
+  variables:
+    DCA_CI_EXPECTED_ARCH: "arm64"
+
+.macos_arm64:
+  tags: [macos]
+  before_script:
+    - mkdir -p logs
+    - rm -f logs/ci-preflight.log logs/validation-bootstrap.log
+      logs/validation-*.log logs/release-build.log
+      logs/release-package.log
+    - echo "macOS Rust runner preflight started." > logs/ci-preflight.log
+    - |
+      if ! rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal \
+        --component rustfmt,clippy >> logs/ci-preflight.log 2>&1; then
+        echo "Rust toolchain installation failed." >> logs/ci-preflight.log
+        exit 1
+      fi
+    - uname -s >> logs/ci-preflight.log
+    - uname -m >> logs/ci-preflight.log
+    - |
+      if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
+        echo "Expected an ARM64 macOS runner." >> logs/ci-preflight.log
+        exit 1
+      fi
+  cache: *cargo_cache
+
+.windows_rust:
+  tags: [windows]
+  before_script:
+    - |
+      $ErrorActionPreference = "Stop"
+      New-Item -ItemType Directory -Force logs | Out-Null
+      Get-ChildItem -Path logs -Filter "validation-*.log" -File `
+        -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction Stop
+      foreach ($log in @(
+        "logs/ci-preflight.log",
+        "logs/validation-bootstrap.log",
+        "logs/release-build.log",
+        "logs/release-package.log"
+      )) {
+        if (Test-Path -LiteralPath $log -PathType Leaf) {
+          Remove-Item -LiteralPath $log -Force
+        }
+      }
+      Set-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+        -Value "$env:DCA_CI_PREFLIGHT_LABEL preflight started."
+      Add-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+        -Value "Windows build $([System.Environment]::OSVersion.Version.Build)"
+      Add-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+        -Value "Architecture $env:PROCESSOR_ARCHITECTURE"
+      if ([System.Environment]::OSVersion.Version.Build -lt 10240) {
+        $message = "Windows 10 build 10240 or newer is required"
+        Add-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+          -Value $message
+        throw $message
+      }
+      if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
+        $message = "Expected an x86_64 Windows runner"
+        Add-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+          -Value $message
+        throw $message
+      }
+      $ErrorActionPreference = "Continue"
+      & rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal `
+        --component "rustfmt,clippy" 2>&1 |
+        Out-File -FilePath "logs/ci-preflight.log" -Append -Encoding utf8 `
+          -ErrorAction Stop
+      $rustupExitCode = $LastExitCode
+      $ErrorActionPreference = "Stop"
+      if ($rustupExitCode -ne 0) {
+        exit $rustupExitCode
+      }
+  cache: []
+
+.validation:
+  stage: test
+  timeout: 60m
+  artifacts:
+    name: "$CI_JOB_NAME_SLUG-$CI_COMMIT_SHORT_SHA-failure"
+    when: on_failure
+    expire_in: 1 week
+    paths:
+      - logs/ci-preflight.log
+      - logs/validation-bootstrap.log
+      - logs/validation-*.log
+
+.unix_validation:
+  extends: .validation
+  script:
+    - mkdir -p target logs
+    - |
+      if ! rustc validate.rs -O -o target/validate \
+        > logs/validation-bootstrap.log 2>&1; then
+        echo "FAIL: validator compilation; download the job artifact for diagnostics"
+        exit 1
+      fi
+    - |
+      set -o pipefail
+      if target/validate --without-audit 2>&1 |
+        tee logs/validation-bootstrap.log; then
+        rm -f logs/validation-bootstrap.log
+      else
+        echo "FAIL: validation; download the job artifact for diagnostics"
+        exit 1
+      fi
+
+test:ubuntu:x86_64:
+  extends:
+    - .ubuntu_x86_64
+    - .unix_validation
+
+test:ubuntu:arm64:
+  extends:
+    - .ubuntu_arm64
+    - .unix_validation
+
+test:macos:arm64:
+  extends:
+    - .macos_arm64
+    - .unix_validation
+
+.windows_validation:
+  extends:
+    - .windows_rust
+    - .validation
+  script:
+    - |
+      $ErrorActionPreference = "Stop"
+      New-Item -ItemType Directory -Force target, logs | Out-Null
+      if ([string]::IsNullOrWhiteSpace($env:DCA_VALIDATION_MODE)) {
+        throw "DCA_VALIDATION_MODE is required"
+      }
+      $ErrorActionPreference = "Continue"
+      & rustc validate.rs -O -o target\validate.exe 2>&1 |
+        Out-File -FilePath "logs/validation-bootstrap.log" -Encoding utf8 `
+          -ErrorAction Stop
+      $compileExitCode = $LastExitCode
+      $ErrorActionPreference = "Stop"
+      if ($compileExitCode -ne 0) {
+        Write-Host "FAIL: validator compilation; download the job artifact"
+        exit $compileExitCode
+      }
+      Set-Content -LiteralPath "logs/validation-bootstrap.log" -Encoding utf8 `
+        -Value "Validator started."
+      Write-Host "Validator started."
+      $ErrorActionPreference = "Continue"
+      & .\target\validate.exe $env:DCA_VALIDATION_MODE 2>&1 |
+        ForEach-Object {
+          $line = $_.ToString()
+          Write-Host $line
+          Add-Content -LiteralPath "logs/validation-bootstrap.log" `
+            -Value $line -Encoding utf8 -ErrorAction Stop
+        }
+      $validationExitCode = $LastExitCode
+      $ErrorActionPreference = "Stop"
+      if ($validationExitCode -ne 0) {
+        exit $validationExitCode
+      }
+      Remove-Item -LiteralPath "logs/validation-bootstrap.log" -Force
+
+test:windows:quality:x86_64:
+  extends: .windows_validation
+  variables:
+    DCA_CI_PREFLIGHT_LABEL: "Windows quality validation"
+    DCA_VALIDATION_MODE: "--quality-checks-only"
+
+test:windows:tests:x86_64:
+  extends: .windows_validation
+  variables:
+    DCA_CI_PREFLIGHT_LABEL: "Windows test validation"
+    DCA_VALIDATION_MODE: "--tests-only"
+
+test:spot-sidecar:python3.10:
+  stage: test
+  tags: [linux]
+  image:
+    name: python:3.10-bookworm
+    docker:
+      platform: amd64
+  timeout: 60m
+  script:
+    - mkdir -p logs
+    - rm -f logs/spot-sidecar-tests.log
+    - |
+      if python -m unittest discover -s tests/python -p 'test_*.py' -v \
+        > logs/spot-sidecar-tests.log 2>&1; then
+        echo "PASS: Spot sidecar tests"
+      else
+        echo "FAIL: Spot sidecar tests; download the job artifact for diagnostics"
+        exit 1
+      fi
+  artifacts:
+    name: "$CI_JOB_NAME_SLUG-$CI_COMMIT_SHORT_SHA-failure"
+    when: on_failure
+    expire_in: 1 week
+    paths:
+      - logs/spot-sidecar-tests.log
+
+audit:dependencies:
+  stage: test
+  tags: [linux]
+  image:
+    name: rust:1.96.0-bookworm
+    docker:
+      platform: amd64
+  timeout: 60m
+  before_script:
+    - mkdir -p logs
+    - rm -f logs/ci-preflight.log logs/dependency-audit.log
+    - echo "Dependency audit preflight started." > logs/ci-preflight.log
+    - rustc --version >> logs/ci-preflight.log 2>&1
+    - cargo --version >> logs/ci-preflight.log 2>&1
+    - uname -s >> logs/ci-preflight.log
+    - uname -m >> logs/ci-preflight.log
+    - export PATH="$CARGO_HOME/bin:$PATH"
+  script:
+    - |
+      if ! cargo install cargo-audit --version 0.22.2 --locked --quiet \
+        > logs/dependency-audit.log 2>&1; then
+        echo "FAIL: cargo-audit installation; download the job artifact for diagnostics"
+        exit 1
+      fi
+      if cargo audit --deny unsound --deny yanked \
+        >> logs/dependency-audit.log 2>&1; then
+        echo "PASS: dependency security audit"
+      else
+        echo "FAIL: dependency security audit; download the job artifact for diagnostics"
+        exit 1
+      fi
+  cache: *cargo_cache
+  artifacts:
+    name: "$CI_JOB_NAME_SLUG-$CI_COMMIT_SHORT_SHA-failure"
+    when: on_failure
+    expire_in: 1 week
+    paths:
+      - logs/ci-preflight.log
+      - logs/dependency-audit.log
+
+.spot_runtime:
+  stage: runtime
+  timeout: 60m
+  artifacts:
+    name: "$CI_JOB_NAME_SLUG-$CI_COMMIT_SHORT_SHA"
+    when: always
+    expire_in: 1 week
+    paths:
+      - dist/spot/$DCA_SPOT_RUNTIME_FILENAME
+      - dist/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256
+      - logs/ci-preflight.log
+      - logs/spot-runtime-build.log
+
+.unix_spot_runtime:
+  extends: .spot_runtime
+  script:
+    - |
+      if ! "$DCA_SPOT_PYTHON" -m pip install \
+        --requirement platforms/spot/requirements-build.txt \
+        > logs/spot-runtime-build.log 2>&1; then
+        echo "FAIL: Spot runtime dependencies; download the job artifact for diagnostics"
+        exit 1
+      fi
+      if "$DCA_SPOT_PYTHON" platforms/spot/build_runtime.py \
+        >> logs/spot-runtime-build.log 2>&1; then
+        echo "PASS: Spot runtime build"
+      else
+        echo "FAIL: Spot runtime build; download the job artifact for diagnostics"
+        exit 1
+      fi
+      for artifact in \
+        "dist/spot/$DCA_SPOT_RUNTIME_FILENAME" \
+        "dist/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256"; do
+        if [ ! -s "$artifact" ]; then
+          echo "Missing or empty expected artifact: $artifact" \
+            >> logs/spot-runtime-build.log
+          echo "FAIL: Spot runtime output; download the job artifact for diagnostics"
+          exit 1
+        fi
+      done
+      du -h "dist/spot/$DCA_SPOT_RUNTIME_FILENAME" \
+        "dist/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256" \
+        >> logs/spot-runtime-build.log 2>&1
+  after_script:
+    - |
+      cleanup_failed=false
+      mkdir -p logs
+      if ! rm -rf .spot-runtime-build-venv dist/pyinstaller-work \
+        2>> logs/spot-runtime-build.log; then
+        cleanup_failed=true
+      fi
+      if [ "$CI_JOB_STATUS" = success ] && [ "$cleanup_failed" = false ]; then
+        if ! rm -f logs/ci-preflight.log 2>> logs/spot-runtime-build.log; then
+          cleanup_failed=true
+        fi
+        if [ "$cleanup_failed" = false ] &&
+          ! rm -f logs/spot-runtime-build.log \
+            2>> logs/spot-runtime-build.log; then
+          cleanup_failed=true
+        fi
+      else
+        if ! rm -f "dist/spot/$DCA_SPOT_RUNTIME_FILENAME" \
+          "dist/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256" \
+          2>> logs/spot-runtime-build.log; then
+          cleanup_failed=true
+        fi
+      fi
+      if [ "$cleanup_failed" = true ]; then
+        rm -f "dist/spot/$DCA_SPOT_RUNTIME_FILENAME" \
+          "dist/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256" \
+          2>> logs/spot-runtime-build.log || true
+        if [ -e "dist/spot/$DCA_SPOT_RUNTIME_FILENAME" ] ||
+          [ -e "dist/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256" ]; then
+          echo "Artifact cleanup failed and a partial product could not be removed." \
+            >> logs/spot-runtime-build.log
+        else
+          echo "Artifact cleanup failed; partial products were removed." \
+            >> logs/spot-runtime-build.log
+        fi
+        exit 1
+      fi
+
+.ubuntu_spot_runtime:
+  extends: .unix_spot_runtime
+  tags: [linux]
+  variables:
+    DCA_SPOT_PYTHON: "python"
+  before_script:
+    - mkdir -p logs
+    - rm -f logs/ci-preflight.log logs/spot-runtime-build.log
+      "dist/spot/$DCA_SPOT_RUNTIME_FILENAME"
+      "dist/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256"
+    - |
+      {
+        echo "Linux Spot runtime preflight started."
+        python --version
+        uname -s
+        uname -m
+      } > logs/ci-preflight.log 2>&1
+      actual_architecture="$(uname -m)"
+      case "$DCA_CI_EXPECTED_ARCH:$actual_architecture" in
+        x86_64:x86_64|arm64:aarch64|arm64:arm64) ;;
+        *)
+          echo "Expected $DCA_CI_EXPECTED_ARCH, found $actual_architecture." \
+            >> logs/ci-preflight.log
+          exit 1
+          ;;
+      esac
+
+build:spot-runtime:ubuntu:x86_64:
+  extends: .ubuntu_spot_runtime
+  image:
+    name: python:3.10-bookworm
+    docker:
+      platform: amd64
+  variables:
+    DCA_CI_EXPECTED_ARCH: "x86_64"
+    DCA_SPOT_RUNTIME_FILENAME: "spot-sidecar-x86_64-unknown-linux-gnu"
+
+build:spot-runtime:ubuntu:arm64:
+  extends: .ubuntu_spot_runtime
+  image:
+    name: python:3.10-bookworm
+    docker:
+      platform: arm64
+  variables:
+    DCA_CI_EXPECTED_ARCH: "arm64"
+    DCA_SPOT_RUNTIME_FILENAME: "spot-sidecar-aarch64-unknown-linux-gnu"
+
+build:spot-runtime:macos:arm64:
+  extends: .unix_spot_runtime
+  tags: [macos]
+  variables:
+    DCA_SPOT_PYTHON: ".spot-runtime-build-venv/bin/python"
+    DCA_SPOT_RUNTIME_FILENAME: "spot-sidecar-aarch64-apple-darwin"
+  before_script:
+    - mkdir -p logs
+    - rm -f logs/ci-preflight.log logs/spot-runtime-build.log
+      "dist/spot/$DCA_SPOT_RUNTIME_FILENAME"
+      "dist/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256"
+    - echo "macOS Spot runtime preflight started." > logs/ci-preflight.log
+    - uname -s >> logs/ci-preflight.log
+    - uname -m >> logs/ci-preflight.log
+    - |
+      if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
+        echo "Expected an ARM64 macOS runner." >> logs/ci-preflight.log
+        exit 1
+      fi
+      if ! python3.10 --version >> logs/ci-preflight.log 2>&1; then
+        echo "Python 3.10 is required to build the Spot runtime." \
+          >> logs/ci-preflight.log
+        exit 1
+      fi
+      if ! python3.10 -m venv --clear .spot-runtime-build-venv \
+        >> logs/ci-preflight.log 2>&1; then
+        echo "Could not create the isolated Python environment." \
+          >> logs/ci-preflight.log
+        exit 1
+      fi
+      if ! "$DCA_SPOT_PYTHON" --version >> logs/ci-preflight.log 2>&1; then
+        echo "The isolated Python environment is unusable." \
+          >> logs/ci-preflight.log
+        exit 1
+      fi
+
+build:spot-runtime:windows:x86_64:
+  extends: .spot_runtime
+  tags: [windows]
+  variables:
+    DCA_SPOT_RUNTIME_FILENAME: "spot-sidecar-x86_64-pc-windows-msvc.exe"
+  before_script:
+    - |
+      $ErrorActionPreference = "Stop"
+      New-Item -ItemType Directory -Force logs | Out-Null
+      foreach ($log in @(
+        "logs/ci-preflight.log",
+        "logs/spot-runtime-build.log"
+      )) {
+        if (Test-Path -LiteralPath $log -PathType Leaf) {
+          Remove-Item -LiteralPath $log -Force
+        }
+      }
+      $runtimePath = Join-Path "dist/spot" $env:DCA_SPOT_RUNTIME_FILENAME
+      $checksumPath = Join-Path "dist/spot" `
+        "${env:DCA_SPOT_RUNTIME_FILENAME}.sha256"
+      foreach ($artifact in @($runtimePath, $checksumPath)) {
+        if (Test-Path -LiteralPath $artifact -PathType Leaf) {
+          Remove-Item -LiteralPath $artifact -Force
+        }
+      }
+      foreach ($directory in @(
+        ".spot-runtime-build-venv",
+        "dist/pyinstaller-work"
+      )) {
+        if (Test-Path -LiteralPath $directory) {
+          Remove-Item -LiteralPath $directory -Recurse -Force
+        }
+      }
+      Set-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+        -Value "Windows Spot runtime preflight started."
+      Add-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+        -Value "Windows build $([System.Environment]::OSVersion.Version.Build)"
+      Add-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+        -Value "Architecture $env:PROCESSOR_ARCHITECTURE"
+      if ([System.Environment]::OSVersion.Version.Build -lt 10240) {
+        $message = "Windows 10 build 10240 or newer is required"
+        Add-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+          -Value $message
+        throw $message
+      }
+      if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
+        $message = "Expected an x86_64 Windows runner"
+        Add-Content -LiteralPath "logs/ci-preflight.log" -Encoding utf8 `
+          -Value $message
+        throw $message
+      }
+      $ErrorActionPreference = "Continue"
+      & py -3.10 --version 2>&1 |
+        Out-File -FilePath "logs/ci-preflight.log" -Append -Encoding utf8 `
+          -ErrorAction Stop
+      $pythonExitCode = $LastExitCode
+      $ErrorActionPreference = "Stop"
+      if ($pythonExitCode -ne 0) {
+        exit $pythonExitCode
+      }
+      $ErrorActionPreference = "Continue"
+      & py -3.10 -m venv --clear .spot-runtime-build-venv 2>&1 |
+        Out-File -FilePath "logs/ci-preflight.log" -Append -Encoding utf8 `
+          -ErrorAction Stop
+      $venvExitCode = $LastExitCode
+      $ErrorActionPreference = "Stop"
+      if ($venvExitCode -ne 0) {
+        exit $venvExitCode
+      }
+  script:
+    - |
+      $ErrorActionPreference = "Stop"
+      $python = Join-Path ".spot-runtime-build-venv" "Scripts/python.exe"
+      $ErrorActionPreference = "Continue"
+      & $python -m pip install `
+        --requirement platforms/spot/requirements-build.txt 2>&1 |
+        Out-File -FilePath "logs/spot-runtime-build.log" -Encoding utf8 `
+          -ErrorAction Stop
+      $installExitCode = $LastExitCode
+      $ErrorActionPreference = "Stop"
+      if ($installExitCode -ne 0) {
+        exit $installExitCode
+      }
+      $ErrorActionPreference = "Continue"
+      & $python platforms/spot/build_runtime.py 2>&1 |
+        Out-File -FilePath "logs/spot-runtime-build.log" -Append -Encoding utf8 `
+          -ErrorAction Stop
+      $buildExitCode = $LastExitCode
+      $ErrorActionPreference = "Stop"
+      if ($buildExitCode -ne 0) {
+        exit $buildExitCode
+      }
+      $runtimePath = Join-Path "dist/spot" $env:DCA_SPOT_RUNTIME_FILENAME
+      $checksumPath = Join-Path "dist/spot" `
+        "${env:DCA_SPOT_RUNTIME_FILENAME}.sha256"
+      foreach ($artifact in @($runtimePath, $checksumPath)) {
+        if (
+          -not (Test-Path -LiteralPath $artifact -PathType Leaf) -or
+          (Get-Item -LiteralPath $artifact).Length -eq 0
+        ) {
+          Add-Content -LiteralPath "logs/spot-runtime-build.log" `
+            -Value "Missing or empty expected artifact: $artifact" -Encoding utf8
+          throw "Spot runtime output is missing or empty: $artifact"
+        }
+      }
+      $runtimeBytes = (Get-Item -LiteralPath $runtimePath).Length
+      $checksumBytes = (Get-Item -LiteralPath $checksumPath).Length
+      Add-Content -LiteralPath "logs/spot-runtime-build.log" -Encoding utf8 `
+        -Value "Spot runtime size: $runtimeBytes bytes"
+      Add-Content -LiteralPath "logs/spot-runtime-build.log" -Encoding utf8 `
+        -Value "Checksum size: $checksumBytes bytes"
+      Write-Host "PASS: Spot runtime build ($runtimeBytes bytes)"
+  after_script:
+    - |
+      $ErrorActionPreference = "Stop"
+      $runtimePath = Join-Path "dist/spot" $env:DCA_SPOT_RUNTIME_FILENAME
+      $checksumPath = Join-Path "dist/spot" `
+        "${env:DCA_SPOT_RUNTIME_FILENAME}.sha256"
+      try {
+        foreach ($directory in @(
+          ".spot-runtime-build-venv",
+          "dist/pyinstaller-work"
+        )) {
+          if (Test-Path -LiteralPath $directory) {
+            Remove-Item -LiteralPath $directory -Recurse -Force
+          }
+        }
+        if ($env:CI_JOB_STATUS -eq "success") {
+          foreach ($log in @(
+            "logs/ci-preflight.log",
+            "logs/spot-runtime-build.log"
+          )) {
+            if (Test-Path -LiteralPath $log -PathType Leaf) {
+              Remove-Item -LiteralPath $log -Force
+            }
+          }
+        } else {
+          foreach ($artifact in @($runtimePath, $checksumPath)) {
+            if (Test-Path -LiteralPath $artifact -PathType Leaf) {
+              Remove-Item -LiteralPath $artifact -Force
+            }
+          }
+        }
+      } catch {
+        $cleanupError = $_.Exception.Message
+        foreach ($artifact in @($runtimePath, $checksumPath)) {
+          Remove-Item -LiteralPath $artifact -Force `
+            -ErrorAction SilentlyContinue
+        }
+        New-Item -ItemType Directory -Force logs -ErrorAction SilentlyContinue |
+          Out-Null
+        Add-Content -LiteralPath "logs/spot-runtime-build.log" -Encoding utf8 `
+          -Value "Artifact cleanup failed: $cleanupError" `
+          -ErrorAction SilentlyContinue
+        throw
+      }
+
+.release:
+  stage: release
+  timeout: 60m
+  artifacts:
+    name: "$DCA_RELEASE_NAME-$CI_COMMIT_SHORT_SHA"
+    when: always
+    expire_in: 1 week
+    paths:
+      - dist/release/$DCA_RELEASE_NAME/
+      - logs/ci-preflight.log
+      - logs/release-build.log
+      - logs/release-package.log
+
+.unix_release:
+  extends: .release
+  script:
+    - |
+      echo "Release build started: cargo build --release --locked --quiet -p dca" \
+        > logs/release-build.log
+      if ! cargo build --release --locked --quiet -p dca \
+        >> logs/release-build.log 2>&1; then
+        echo "FAIL: release build; download the job artifact for diagnostics"
+        exit 1
+      fi
+      if ! target/release/dca --help >> logs/release-build.log 2>&1; then
+        echo "FAIL: release smoke test; download the job artifact for diagnostics"
+        exit 1
+      fi
+    - |
+      set -o pipefail
+      echo "Packaging release $DCA_RELEASE_NAME." > logs/release-package.log
+      if [ -z "$DCA_RELEASE_NAME" ]; then
+        echo "DCA_RELEASE_NAME is empty." >> logs/release-package.log
+        exit 1
+      fi
+      if [ -z "$DCA_SPOT_RUNTIME_FILENAME" ]; then
+        echo "DCA_SPOT_RUNTIME_FILENAME is empty." >> logs/release-package.log
+        exit 1
+      fi
+      release_dir="dist/release/$DCA_RELEASE_NAME"
+      if ! rm -rf "$release_dir" >> logs/release-package.log 2>&1; then
+        echo "Could not clear the release directory." >> logs/release-package.log
+        exit 1
+      fi
+      if ! mkdir -p "$release_dir/platforms/spot" \
+        >> logs/release-package.log 2>&1; then
+        echo "Could not create the release directory." >> logs/release-package.log
+        exit 1
+      fi
+      if ! cp target/release/dca "$release_dir/dca" \
+        >> logs/release-package.log 2>&1; then
+        echo "Could not copy the DCA executable." >> logs/release-package.log
+        exit 1
+      fi
+      if ! cp "dist/spot/$DCA_SPOT_RUNTIME_FILENAME" \
+        "$release_dir/platforms/spot/$DCA_SPOT_RUNTIME_FILENAME" \
+        >> logs/release-package.log 2>&1; then
+        echo "Could not copy the Spot runtime." >> logs/release-package.log
+        exit 1
+      fi
+      if ! cp "dist/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256" \
+        "$release_dir/platforms/spot/$DCA_SPOT_RUNTIME_FILENAME.sha256" \
+        >> logs/release-package.log 2>&1; then
+        echo "Could not copy the Spot runtime checksum." \
+          >> logs/release-package.log
+        exit 1
+      fi
+      if ! du -sh "$release_dir" | tee -a logs/release-package.log; then
+        echo "Could not measure the release directory." >> logs/release-package.log
+        exit 1
+      fi
+  after_script:
+    - |
+      cleanup_failed=false
+      mkdir -p logs
+      if [ "$CI_JOB_STATUS" = success ]; then
+        if ! rm -f logs/ci-preflight.log 2>> logs/release-package.log; then
+          cleanup_failed=true
+        fi
+        if [ "$cleanup_failed" = false ] &&
+          ! rm -f logs/release-build.log 2>> logs/release-package.log; then
+          cleanup_failed=true
+        fi
+        if [ "$cleanup_failed" = false ] &&
+          ! rm -f logs/release-package.log \
+            2>> logs/release-package.log; then
+          cleanup_failed=true
+        fi
+      else
+        if ! rm -rf "dist/release/$DCA_RELEASE_NAME" \
+          2>> logs/release-package.log; then
+          cleanup_failed=true
+        fi
+      fi
+      if [ "$cleanup_failed" = true ]; then
+        rm -rf "dist/release/$DCA_RELEASE_NAME" \
+          2>> logs/release-package.log || true
+        if [ -e "dist/release/$DCA_RELEASE_NAME" ]; then
+          echo "Artifact cleanup failed and the partial release could not be removed." \
+            >> logs/release-package.log
+        else
+          echo "Artifact cleanup failed; the partial release was removed." \
+            >> logs/release-package.log
+        fi
+        exit 1
+      fi
+
+build:ubuntu:x86_64:
+  extends:
+    - .ubuntu_x86_64
+    - .unix_release
+  variables:
+    DCA_RELEASE_NAME: "dca-x86_64-unknown-linux-gnu"
+    DCA_SPOT_RUNTIME_FILENAME: "spot-sidecar-x86_64-unknown-linux-gnu"
+  dependencies:
+    - build:spot-runtime:ubuntu:x86_64
+
+build:ubuntu:arm64:
+  extends:
+    - .ubuntu_arm64
+    - .unix_release
+  variables:
+    DCA_RELEASE_NAME: "dca-aarch64-unknown-linux-gnu"
+    DCA_SPOT_RUNTIME_FILENAME: "spot-sidecar-aarch64-unknown-linux-gnu"
+  dependencies:
+    - build:spot-runtime:ubuntu:arm64
+
+build:macos:arm64:
+  extends:
+    - .macos_arm64
+    - .unix_release
+  variables:
+    DCA_RELEASE_NAME: "dca-aarch64-apple-darwin"
+    DCA_SPOT_RUNTIME_FILENAME: "spot-sidecar-aarch64-apple-darwin"
+  dependencies:
+    - build:spot-runtime:macos:arm64
+
+build:windows:x86_64:
+  extends:
+    - .windows_rust
+    - .release
+  variables:
+    DCA_CI_PREFLIGHT_LABEL: "Windows release"
+    DCA_RELEASE_NAME: "dca-x86_64-pc-windows-msvc"
+    DCA_SPOT_RUNTIME_FILENAME: "spot-sidecar-x86_64-pc-windows-msvc.exe"
+  dependencies:
+    - build:spot-runtime:windows:x86_64
+  script:
+    - |
+      $ErrorActionPreference = "Stop"
+      if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
+        $env:RUSTFLAGS = "-D warnings"
+      } else {
+        $env:RUSTFLAGS = "$($env:RUSTFLAGS.Trim()) -D warnings"
+      }
+      Set-Content -LiteralPath "logs/release-build.log" -Encoding utf8 `
+        -Value (
+          "Release build started: cargo build --release --workspace " +
+          "--all-targets --all-features --locked --keep-going --quiet"
+        )
+      $ErrorActionPreference = "Continue"
+      & cargo build --release --workspace --all-targets --all-features `
+        --locked --keep-going --quiet 2>&1 |
+        Out-File -FilePath "logs/release-build.log" -Append -Encoding utf8 `
+          -ErrorAction Stop
+      $buildExitCode = $LastExitCode
+      $ErrorActionPreference = "Stop"
+      if ($buildExitCode -ne 0) {
+        exit $buildExitCode
+      }
+      $ErrorActionPreference = "Continue"
+      & .\target\release\dca.exe --help 2>&1 |
+        Out-File -FilePath "logs/release-build.log" -Append -Encoding utf8 `
+          -ErrorAction Stop
+      $smokeExitCode = $LastExitCode
+      $ErrorActionPreference = "Stop"
+      if ($smokeExitCode -ne 0) {
+        exit $smokeExitCode
+      }
+    - |
+      $releaseDir = Join-Path "dist/release" $env:DCA_RELEASE_NAME
+      $spotDir = Join-Path $releaseDir "platforms/spot"
+      Set-Content -LiteralPath "logs/release-package.log" -Encoding utf8 `
+        -Value "Packaging release $env:DCA_RELEASE_NAME."
+      try {
+        if ([string]::IsNullOrWhiteSpace($env:DCA_RELEASE_NAME)) {
+          throw "DCA_RELEASE_NAME is empty."
+        }
+        if ([string]::IsNullOrWhiteSpace($env:DCA_SPOT_RUNTIME_FILENAME)) {
+          throw "DCA_SPOT_RUNTIME_FILENAME is empty."
+        }
+        if (Test-Path -LiteralPath $releaseDir) {
+          Remove-Item -LiteralPath $releaseDir -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force $spotDir | Out-Null
+        Copy-Item -LiteralPath "target/release/dca.exe" `
+          -Destination (Join-Path $releaseDir "dca.exe") -ErrorAction Stop
+        Copy-Item `
+          -LiteralPath (Join-Path "dist/spot" $env:DCA_SPOT_RUNTIME_FILENAME) `
+          -Destination (Join-Path $spotDir $env:DCA_SPOT_RUNTIME_FILENAME) `
+          -ErrorAction Stop
+        Copy-Item `
+          -LiteralPath (
+            Join-Path "dist/spot" "${env:DCA_SPOT_RUNTIME_FILENAME}.sha256"
+          ) `
+          -Destination (
+            Join-Path $spotDir "${env:DCA_SPOT_RUNTIME_FILENAME}.sha256"
+          ) `
+          -ErrorAction Stop
+        $releaseBytes = (
+          Get-ChildItem -LiteralPath $releaseDir -Recurse -File |
+          Measure-Object -Property Length -Sum
+        ).Sum
+        Add-Content -LiteralPath "logs/release-package.log" -Encoding utf8 `
+          -Value "Release size: $releaseBytes bytes"
+        Write-Host "Release size: $releaseBytes bytes"
+      } catch {
+        Add-Content -LiteralPath "logs/release-package.log" -Encoding utf8 `
+          -Value ($_ | Out-String)
+        throw
+      }
+  after_script:
+    - |
+      $ErrorActionPreference = "Stop"
+      $releaseDir = Join-Path "dist/release" $env:DCA_RELEASE_NAME
+      try {
+        if ($env:CI_JOB_STATUS -eq "success") {
+          foreach ($log in @(
+            "logs/ci-preflight.log",
+            "logs/release-build.log",
+            "logs/release-package.log"
+          )) {
+            if (Test-Path -LiteralPath $log -PathType Leaf) {
+              Remove-Item -LiteralPath $log -Force
+            }
+          }
+        } elseif (Test-Path -LiteralPath $releaseDir) {
+          Remove-Item -LiteralPath $releaseDir -Recurse -Force
+        }
+      } catch {
+        $cleanupError = $_.Exception.Message
+        Remove-Item -LiteralPath $releaseDir -Recurse -Force `
+          -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force logs -ErrorAction SilentlyContinue |
+          Out-Null
+        Add-Content -LiteralPath "logs/release-package.log" -Encoding utf8 `
+          -Value "Artifact cleanup failed: $cleanupError" `
+          -ErrorAction SilentlyContinue
+        throw
+      }

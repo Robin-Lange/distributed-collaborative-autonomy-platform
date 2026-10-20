@@ -1,0 +1,4 @@
+bosdyn-client==5.1.4
+eclipse-zenoh==1.9.0
+numpy==2.2.6
+protobuf==6.33.5

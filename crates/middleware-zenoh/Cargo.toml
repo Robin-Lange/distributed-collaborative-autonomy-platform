@@ -1,0 +1,17 @@
+[package]
+name = "dca-middleware-zenoh"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Zenoh transport for the distributed collaborative autonomy platform"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core_msgs = { package = "dca-contracts", path = "../contracts" }
+crossbeam-channel.workspace = true
+futures.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zenoh.workspace = true

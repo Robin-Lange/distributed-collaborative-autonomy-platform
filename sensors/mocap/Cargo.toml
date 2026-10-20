@@ -1,0 +1,17 @@
+[package]
+name = "dca-sensor-mocap"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Motion-capture transport bridge and object tracker"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+core_msgs = { package = "dca-contracts", path = "../../crates/contracts" }
+crossbeam-channel.workspace = true
+ctrlc.workspace = true
+dds_support = { package = "dca-middleware-zenoh", path = "../../crates/middleware-zenoh" }
+glam.workspace = true
+prost.workspace = true
+zenoh.workspace = true

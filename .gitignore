@@ -1,0 +1,11 @@
+target/
+dist/
+.cargo/
+logs/
+.DS_Store
+__pycache__/
+*.pyc
+.spot-runtime-build-venv/
+style-guide.md
+/validate
+/validate.exe

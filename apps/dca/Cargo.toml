@@ -1,0 +1,25 @@
+[package]
+name = "dca"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Launcher and operator TUI for the distributed collaborative autonomy platform"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agent = { package = "dca-agent", path = "../../crates/agent" }
+chrono.workspace = true
+core_msgs = { package = "dca-contracts", path = "../../crates/contracts" }
+crossbeam-channel.workspace = true
+crossterm.workspace = true
+ctrlc.workspace = true
+dds_support = { package = "dca-middleware-zenoh", path = "../../crates/middleware-zenoh" }
+environment_sim = { package = "dca-simulation-avian", path = "../../simulation/avian" }
+mcap_recorder = { package = "dca-mcap-recorder", path = "../../observers/mcap-recorder" }
+platform_spot = { package = "dca-platform-spot", path = "../../platforms/spot" }
+ratatui.workspace = true
+secrecy.workspace = true
+sensor_mocap = { package = "dca-sensor-mocap", path = "../../sensors/mocap" }
+serde_json.workspace = true
+visualizer = { package = "dca-visualizer", path = "../../observers/visualizer" }
