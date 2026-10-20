@@ -300,7 +300,7 @@ impl Invocation {
         let options = LauncherOptions {
             visualizer: false,
             mcap_recorder: false,
-            sidecar_ip: "192.168.55.21".to_owned(),
+            sidecar_ip: "198.51.100.21".to_owned(),
             sidecar_auto: SidecarAutoFlags {
                 power_on: true,
                 stand: true,

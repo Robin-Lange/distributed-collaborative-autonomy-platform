@@ -1696,7 +1696,7 @@ def _safe_power_off(robot) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Spot <-> decentralized_autonomy bus sidecar")
-    parser.add_argument("hostname", nargs="?", help="Spot host/IP, e.g. 192.168.55.21")
+    parser.add_argument("hostname", nargs="?", help="Spot host/IP, e.g. 198.51.100.21")
     parser.add_argument("--runtime-self-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--agent-id", default="agent_01")
     parser.add_argument("--auto-power-on", action="store_true", help="power motors on at startup")

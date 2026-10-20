@@ -66,15 +66,20 @@ fn main() {
     println!();
 
     let specs = command_specs(mode);
-    let total = specs.len() + 1;
+    let total = specs.len() + 2;
     let mut results = Vec::with_capacity(total);
     println!("[1/{total}] Authored-source lint policy ...");
     let policy_result = check_authored_source_policy(&workspace);
     print_result(&policy_result);
     results.push(policy_result);
 
+    println!("[2/{total}] Public repository hygiene ...");
+    let hygiene_result = check_public_repository_hygiene(&workspace);
+    print_result(&hygiene_result);
+    results.push(hygiene_result);
+
     for (index, spec) in specs.iter().enumerate() {
-        println!("[{}/{total}] {} ...", index + 2, spec.name);
+        println!("[{}/{total}] {} ...", index + 3, spec.name);
         let result = run_command(&workspace, spec);
         print_result(&result);
         results.push(result);
@@ -445,10 +450,192 @@ fn check_authored_source_policy(workspace: &Path) -> CheckResult {
     }
 }
 
+fn check_public_repository_hygiene(workspace: &Path) -> CheckResult {
+    let started = Instant::now();
+    let mut violations = Vec::new();
+    let mut pending = vec![workspace.to_path_buf()];
+
+    while let Some(directory) = pending.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                violations.push(format!("{}: unable to read: {error}", directory.display()));
+                continue;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if !excluded_directory(&path) {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if !is_public_text_file(&path) {
+                continue;
+            }
+
+            let contents = match fs::read_to_string(&path) {
+                Ok(contents) => contents,
+                Err(error) => {
+                    violations.push(format!("{}: unable to read: {error}", path.display()));
+                    continue;
+                }
+            };
+            let relative = path.strip_prefix(workspace).unwrap_or(&path);
+            if relative == Path::new("validate.rs") {
+                continue;
+            }
+            for (index, line) in contents.lines().enumerate() {
+                if line.contains("-----BEGIN ") && line.contains(" PRIVATE KEY-----") {
+                    violations.push(format!(
+                        "{}:{}: possible private key material",
+                        relative.display(),
+                        index + 1
+                    ));
+                }
+                if contains_token_pattern(line) {
+                    violations.push(format!(
+                        "{}:{}: possible access token pattern",
+                        relative.display(),
+                        index + 1
+                    ));
+                }
+                if has_credential_bearing_url(line) {
+                    violations.push(format!(
+                        "{}:{}: credential-bearing URL",
+                        relative.display(),
+                        index + 1
+                    ));
+                }
+
+                for ip in find_ipv4_literals(line) {
+                    if is_private_ipv4(ip) && ip != "127.0.0.1" {
+                        violations.push(format!(
+                            "{}:{}: private IPv4 literal `{ip}`",
+                            relative.display(),
+                            index + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    CheckResult {
+        name: "Public repository hygiene".to_owned(),
+        command: "scan tracked text for private IPs and credential leakage".to_owned(),
+        passed: violations.is_empty(),
+        exit_code: violations.is_empty().then_some(0),
+        duration: started.elapsed(),
+        diagnostics: violations.join("\n"),
+    }
+}
+
 fn excluded_directory(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| matches!(name, ".cargo" | ".git" | "target" | "logs" | "third_party"))
+}
+
+fn is_public_text_file(path: &Path) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        "md", "txt", "toml", "yaml", "yml", "json", "json5", "rs", "py", "ps1", "sh", "proto",
+    ];
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| EXTENSIONS.contains(&extension))
+}
+
+fn has_credential_bearing_url(line: &str) -> bool {
+    line.split_whitespace().any(|token| {
+        let Some(scheme_index) = token.find("://") else {
+            return false;
+        };
+        let remainder = &token[scheme_index + 3..];
+        let authority = remainder.split('/').next().unwrap_or("");
+        let Some(at_index) = authority.find('@') else {
+            return false;
+        };
+        authority[..at_index].contains(':')
+    })
+}
+
+fn contains_token_pattern(line: &str) -> bool {
+    contains_prefixed_alnum(line, "ghp_", 36)
+        || contains_prefixed_alnum(line, "AKIA", 16)
+        || line.contains("xoxb-")
+        || line.contains("xoxa-")
+        || line.contains("xoxp-")
+        || line.contains("xoxr-")
+        || line.contains("xoxs-")
+}
+
+fn contains_prefixed_alnum(line: &str, prefix: &str, required_len: usize) -> bool {
+    let bytes = line.as_bytes();
+    let prefix_bytes = prefix.as_bytes();
+    if prefix_bytes.is_empty() || bytes.len() < prefix_bytes.len() + required_len {
+        return false;
+    }
+
+    for start in 0..=bytes.len() - prefix_bytes.len() - required_len {
+        if &bytes[start..start + prefix_bytes.len()] != prefix_bytes {
+            continue;
+        }
+        let candidate = &bytes
+            [start + prefix_bytes.len()..start + prefix_bytes.len() + required_len];
+        if candidate
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn find_ipv4_literals(line: &str) -> Vec<&str> {
+    let mut literals = Vec::new();
+    for token in line.split(|character: char| !(character.is_ascii_digit() || character == '.')) {
+        if token.matches('.').count() != 3 {
+            continue;
+        }
+        let mut octets = [0_u8; 4];
+        let mut valid = true;
+        for (index, segment) in token.split('.').enumerate() {
+            if index >= 4 || segment.is_empty() {
+                valid = false;
+                break;
+            }
+            match segment.parse::<u8>() {
+                Ok(value) => octets[index] = value,
+                Err(_) => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if valid {
+            literals.push(token);
+        }
+    }
+    literals
+}
+
+fn is_private_ipv4(ip: &str) -> bool {
+    let mut parts = ip.split('.');
+    let Some(first) = parts.next().and_then(|part| part.parse::<u8>().ok()) else {
+        return false;
+    };
+    let Some(second) = parts.next().and_then(|part| part.parse::<u8>().ok()) else {
+        return false;
+    };
+    if parts.count() != 2 {
+        return false;
+    }
+
+    first == 10 || (first == 172 && (16..=31).contains(&second)) || (first == 192 && second == 168)
 }
 
 fn locate_workspace() -> Result<PathBuf, String> {

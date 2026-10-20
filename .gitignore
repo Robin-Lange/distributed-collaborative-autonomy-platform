@@ -2,6 +2,15 @@ target/
 dist/
 .cargo/
 logs/
+.env
+.env.*
+*.pem
+*.key
+*.token
+*.mcap
+*.pcap
+*.pcapng
+captures/
 .DS_Store
 __pycache__/
 *.pyc

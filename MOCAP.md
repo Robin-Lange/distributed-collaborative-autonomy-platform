@@ -77,7 +77,7 @@ For multicast:
 powershell -ExecutionPolicy Bypass `
   -File .\sensors\mocap\natnet_relay.ps1 `
   -Mode multicast `
-  -McastIface 192.168.55.191
+  -McastIface 198.51.100.191
 ```
 
 Replace the interface address with the Windows address selected in Motive. Keep the relay TCP port at 1512; the current Rust relay client uses that fixed local endpoint.
