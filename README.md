@@ -1,10 +1,10 @@
 # Distributed Collaborative Autonomy Platform
 
-A Rust workspace for decentralized multi-robot autonomy experiments. Each robot runs a local agent that accepts behavior requests, applies safety/authority checks, and emits platform-agnostic control requests over Zenoh.
+A Rust workspace for decentralized multi-robot autonomy experiments. Each robot runs a local agent that accepts behavior requests, applies safety/authority checks, and emits platform-agnostic control [...]
 
 ## Motivation
 
-This repository focuses on reproducible engineering for agent-scoped autonomy: behavior contracts, per-agent runtime boundaries, and simulation/hardware integration paths that can be validated from source.
+This repository focuses on reproducible engineering for agent-scoped autonomy: behavior contracts, per-agent runtime boundaries, and simulation/hardware integration paths that can be validated from so[...]
 
 ## Current scope
 
@@ -34,8 +34,8 @@ flowchart LR
     end
 
     S[Avian Simulation World]
-    V[Visualizer (optional)]
-    R[MCAP Recorder (optional)]
+    V["Visualizer (optional)"]
+    R["MCAP Recorder (optional)"]
 
     O --> Z
     Z --> A
@@ -129,7 +129,7 @@ python3.10 -m unittest discover -s tests/python -p 'test_*.py' -v
 
 ## Safety and ethics notice (hardware use)
 
-Hardware integrations can move physical systems. Use only authorized credentials and approved network access, follow vendor/operator safety procedures, and run with proper supervision in controlled environments.
+Hardware integrations can move physical systems. Use only authorized credentials and approved network access, follow vendor/operator safety procedures, and run with proper supervision in controll[...]
 
 ## License and project status
 
