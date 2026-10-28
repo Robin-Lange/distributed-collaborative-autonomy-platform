@@ -58,6 +58,14 @@ jobs:
       - name: Run Rust tests
         run: ./target/validate --tests-only
 
+      - name: Upload validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-validation-reports
+          path: logs/validation-*.log
+          if-no-files-found: ignore
+
   python-tests:
     name: Python sidecar tests
     runs-on: ubuntu-24.04
