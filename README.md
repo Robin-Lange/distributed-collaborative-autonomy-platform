@@ -143,6 +143,8 @@ Run the Python sidecar tests independently:
 python3.10 -m unittest discover -s tests/python -p 'test_*.py' -v
 ```
 
+The same Rust and Python validation paths run automatically on pushes and pull requests via GitHub Actions in `.github/workflows/ci.yml`.
+
 ## Documentation
 
 - [`OVERVIEW.md`](OVERVIEW.md) — architecture boundaries and system overview.
